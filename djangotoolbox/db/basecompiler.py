@@ -43,7 +43,6 @@ else:
         else:
             return query.model._meta.fields
 
-
 EMULATED_OPS = {
     'exact': lambda x, y: y in x if isinstance(x, (list, tuple)) else x == y,
     'iexact': lambda x, y: x.lower() == y.lower(),
@@ -59,6 +58,7 @@ EMULATED_OPS = {
 
 
 class NonrelQuery(object):
+
     """
     Base class for nonrel queries.
 
@@ -90,7 +90,7 @@ class NonrelQuery(object):
         self.compiler = compiler
         self.connection = compiler.connection
         self.ops = compiler.connection.ops
-        self.query = compiler.query # sql.Query
+        self.query = compiler.query  # sql.Query
         self.fields = fields
         self._negated = False
 
@@ -188,46 +188,156 @@ class NonrelQuery(object):
         Produces arguments suitable for add_filter from a WHERE tree
         leaf (a tuple).
         """
+        if django.VERSION >= (1, 7):
+            def decode_child(
+                query,
+                child
+            ):
+                lhs, lhs_params = child.process_lhs(
+                    query.compiler,
+                    query.connection
+                )
+                rhs, rhs_params = child.process_rhs(
+                    query.compiler,
+                    query.connection
+                )
 
-        # TODO: Call get_db_prep_lookup directly, constraint.process
-        #       doesn't do much more.
-        # constraint, lookup_type, annotation, value = child
-        # packed, value = constraint.process(lookup_type, value, self.connection)
-        # alias, column, db_type = packed
-        # field = constraint.field
-        
-        lhs, lhs_params = child.process_lhs(self.compiler, self.connection)
-        rhs, rhs_params = child.process_rhs(self.compiler, self.connection)
+                lookup_type = child.lookup_name
 
-        lookup_type = child.lookup_name
-        annotation = True  # No idea from where to pull this...
-        value = rhs_params
+                '''
+                Since NoSql databases generally don't support
+                aggregation or annotation we simply pass true
+                in this case unless the query has a 
+                get_aggregation method defined. It's a little
+                troubling however that the _nomalize_lookup_value
+                method seems to only use this value in the case
+                that the value is an iterable and the lookup_type
+                equals isnull.
+                '''
+                if hasattr(query, 'get_aggregation'):
+                    annotation = query.get_aggregation(
+                        using=query.connection
+                    )[None]
 
-        packed = child.lhs.get_group_by_cols()[0]
-        alias, column = packed
-        field = child.lhs.output_field
-        db_type = field.db_type(self.connection)
+                else:
+                    annotation = True
 
-        opts = self.query.model._meta
-        if alias and alias != opts.db_table:
-            raise DatabaseError("This database doesn't support JOINs "
-                                "and multi-table inheritance.")
+                value = rhs_params
 
-        # For parent.child_set queries the field held by the constraint
-        # is the parent's primary key, while the field the filter
-        # should consider is the child's foreign key field.
-        if column != field.column:
-            if not field.primary_key:
-                raise DatabaseError("This database doesn't support filtering "
-                                    "on non-primary key ForeignKey fields.")
+                packed = child.lhs.get_group_by_cols()[0]
+                alias, column = packed
+                field = child.lhs.output_field
+                db_type = field.db_type(query.connection)
 
-            field = (f for f in opts.fields if f.column == column).next()
-            assert field.rel is not None
+                opts = query.query.model._meta
+                if alias and alias != opts.db_table:
+                    raise DatabaseError(
+                        "This database doesn't support JOINs "
+                        "and multi-table inheritance."
+                    )
 
-        value = self._normalize_lookup_value(
-            lookup_type, value, field, annotation)
+                '''
+                For parent.child_set queries the field held
+                by the constraint is the parent's primary
+                key, while the field the filter should
+                consider is the child's foreign key field.
+                '''
+                if column != field.column:
+                    if not field.primary_key:
+                        raise DatabaseError(
+                            "This database doesn't support "
+                            "filtering on non-primary key "
+                            "ForeignKey fields."
+                        )
 
-        return field, lookup_type, value
+                    field = (
+                        f for f in opts.fields if
+                        f.column == column
+                    ).next()
+                    assert field.rel is not None
+
+                value = query._normalize_lookup_value(
+                    lookup_type,
+                    value,
+                    field,
+                    annotation
+                )
+
+                return (
+                    field,
+                    lookup_type,
+                    value
+                )
+
+        else:
+            def decode_child(
+                query,
+                child
+            ):
+                """
+                Produces arguments suitable for
+                add_filter from a WHERE tree
+                leaf (a tuple).
+                """
+
+                """
+                TODO: Call get_db_prep_lookup
+                      directly, constraint.process
+                      doesn't do much more.
+                """
+                (
+                    constraint,
+                    lookup_type,
+                    annotation,
+                    value
+                ) = child
+                packed, value = constraint.process(
+                    lookup_type,
+                    value,
+                    query.connection
+                )
+                alias, column, db_type = packed
+                field = constraint.field
+                opts = query.query.model._meta
+                if alias and alias != opts.db_table:
+                    raise DatabaseError(
+                        "This database doesn't support"
+                        "JOINs and multi-table inheritance."
+                    )
+
+                """
+                For parent.child_set queries the field held
+                by the constraint is the parent's primary
+                key, while the field the filter should
+                consider is the child's foreign key field.
+                """
+                if column != field.column:
+                    if not field.primary_key:
+                        raise DatabaseError(
+                            "This database doesn't support "
+                            "filtering on non-primary key "
+                            "ForeignKey fields."
+                        )
+
+                field = (
+                    f for f in opts.fields if
+                    f.column == column
+                ).next()
+                assert field.rel is not None
+
+                value = query._normalize_lookup_value(
+                    lookup_type,
+                    value,
+                    field,
+                    annotation
+                )
+
+                return field, lookup_type, value
+
+        return decode_child(
+            self,
+            child
+        )
 
     def _normalize_lookup_value(self, lookup_type, value, field, annotation):
         """
