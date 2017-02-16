@@ -28,13 +28,21 @@ if django.VERSION >= (1, 5):
 else:
     from django.db.models.sql.constants import LOOKUP_SEP
 
-if django.VERSION >= (1, 6):
+if django.VERSION >= (1, 8):
+    def get_selected_fields(query):
+        if query.select:
+            return [info.target for info in query.select]
+        else:
+            return query.model._meta.fields
+
+elif django.VERSION >= (1, 6):
     def get_selected_fields(query):
         if query.select:
             return [info.field for info in (query.select +
                         query.related_select_cols)]
         else:
             return query.model._meta.fields
+
 else:
     def get_selected_fields(query):
         if query.select_fields:
